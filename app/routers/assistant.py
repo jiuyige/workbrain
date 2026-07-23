@@ -1,14 +1,16 @@
 import json
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
 from app.agent import run_todo_agent
 from app.auth import get_current_user
+from app.context import OrganizationContext, get_current_organization_context
 from app.database import get_session
 from app.llm import plan_assistant_action
 from app.models import AgentTrace, Todo, ToolCallLog, User
+from app.service_agent import confirm_service_request, run_service_request_agent
 
 router = APIRouter(prefix="/assistant", tags=["assistant"])
 
@@ -21,6 +23,14 @@ class AssistantResponse(BaseModel):
     action: str
     reply: str
     todo: dict | None = None
+
+
+class ServiceAssistantRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
+
+
+class ServiceConfirmationRequest(BaseModel):
+    confirmation_token: str = Field(min_length=20, max_length=200)
 
 
 @router.post("", response_model=AssistantResponse)
@@ -91,6 +101,32 @@ def assistant_with_tools(
     return run_todo_agent(
         message_text=request.message,
         current_user=current_user,
+        session=session,
+    )
+
+
+@router.post("/service-tools")
+def assistant_with_service_tools(
+    request: ServiceAssistantRequest,
+    context: OrganizationContext = Depends(get_current_organization_context),
+    session: Session = Depends(get_session),
+):
+    return run_service_request_agent(
+        message_text=request.message,
+        context=context,
+        session=session,
+    )
+
+
+@router.post("/service-tools/confirm")
+def confirm_assistant_service_request(
+    request: ServiceConfirmationRequest,
+    context: OrganizationContext = Depends(get_current_organization_context),
+    session: Session = Depends(get_session),
+):
+    return confirm_service_request(
+        confirmation_token=request.confirmation_token,
+        context=context,
         session=session,
     )
 

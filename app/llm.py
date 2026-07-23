@@ -1,5 +1,6 @@
-from openai import OpenAI
 import json
+
+from openai import OpenAI
 
 from app.config import (
     DEEPSEEK_API_KEY,
@@ -85,7 +86,67 @@ TODO_TOOLS = [
                 "required": ["todo_id"],
             },
         },
-    }
+    },
+]
+
+
+SERVICE_REQUEST_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "list_service_catalog",
+            "description": "List active IT service catalog items in the current organization.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_my_service_requests",
+            "description": "List IT service requests created by the current user.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "prepare_service_request",
+            "description": (
+                "Resolve an IT service and prepare a confirmation preview. "
+                "This tool never creates the request."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "service_catalog_item_id": {
+                        "type": "integer",
+                        "description": "The selected catalog item id, when known.",
+                    },
+                    "service_name": {
+                        "type": "string",
+                        "description": "A service name or search phrase.",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "A concise request title.",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "The business need and relevant details.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
 ]
 
 
@@ -95,17 +156,14 @@ def calculate_cost(
     completion_tokens: int,
 ) -> float:
     cache_hit_cost = (
-        prompt_cache_hit_tokens / 1_000_000
-        * DEEPSEEK_INPUT_CACHE_HIT_PRICE_PER_1M_USD
+        prompt_cache_hit_tokens / 1_000_000 * DEEPSEEK_INPUT_CACHE_HIT_PRICE_PER_1M_USD
     )
     cache_miss_cost = (
-        prompt_cache_miss_tokens / 1_000_000
+        prompt_cache_miss_tokens
+        / 1_000_000
         * DEEPSEEK_INPUT_CACHE_MISS_PRICE_PER_1M_USD
     )
-    output_cost = (
-        completion_tokens / 1_000_000
-        * DEEPSEEK_OUTPUT_PRICE_PER_1M_USD
-    )
+    output_cost = completion_tokens / 1_000_000 * DEEPSEEK_OUTPUT_PRICE_PER_1M_USD
     return cache_hit_cost + cache_miss_cost + output_cost
 
 
@@ -143,8 +201,12 @@ def generate_answer(message: str, history: list[dict] | None = None) -> dict:
     completion_tokens = usage.completion_tokens if usage is not None else 0
     total_tokens = usage.total_tokens if usage is not None else 0
 
-    prompt_cache_hit_tokens = getattr(usage, "prompt_cache_hit_tokens", 0) if usage else 0
-    prompt_cache_miss_tokens = getattr(usage, "prompt_cache_miss_tokens", 0) if usage else 0
+    prompt_cache_hit_tokens = (
+        getattr(usage, "prompt_cache_hit_tokens", 0) if usage else 0
+    )
+    prompt_cache_miss_tokens = (
+        getattr(usage, "prompt_cache_miss_tokens", 0) if usage else 0
+    )
 
     answer = response.choices[0].message.content or ""
 
@@ -165,6 +227,7 @@ def generate_answer(message: str, history: list[dict] | None = None) -> dict:
         ),
         "finish_reason": finish_reason,
     }
+
 
 def analyze_text(text: str) -> dict:
     if DEEPSEEK_API_KEY is None:
@@ -259,6 +322,42 @@ def plan_with_tools(message: str):
         model=DEEPSEEK_MODEL,
         messages=messages,
         tools=TODO_TOOLS,
+        max_tokens=DEEPSEEK_MAX_TOKENS,
+        stream=False,
+        extra_body={"thinking": {"type": "disabled"}},
+    )
+
+    return response.choices[0].message, messages
+
+
+def plan_service_request_with_tools(message: str):
+    if DEEPSEEK_API_KEY is None:
+        raise RuntimeError("DEEPSEEK_API_KEY is not set")
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是 WorkBrain 企业 IT 服务助手。"
+                "用户查询当前组织的 IT 服务目录时调用 list_service_catalog。"
+                "用户查询自己的 IT 服务申请时调用 list_my_service_requests。"
+                "用户想申请 IT 服务时调用 prepare_service_request，并尽量提取服务项目、标题和说明。"
+                "缺少信息也必须调用 prepare_service_request，由工具返回需要补充的字段或候选服务。"
+                "prepare_service_request 只能准备确认内容，绝不能宣称已经创建申请。"
+                "普通知识问题或 Todo 待办操作直接回答，不要调用企业服务工具。"
+                "永远不要调用未提供的工具，也不要伪造用户确认。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": message,
+        },
+    ]
+
+    response = client.chat.completions.create(
+        model=DEEPSEEK_MODEL,
+        messages=messages,
+        tools=SERVICE_REQUEST_TOOLS,
         max_tokens=DEEPSEEK_MAX_TOKENS,
         stream=False,
         extra_body={"thinking": {"type": "disabled"}},

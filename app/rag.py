@@ -4,8 +4,7 @@ import re
 
 from sqlmodel import Session, select
 
-from app.models import DocumentChunk
-
+from app.models import Document, DocumentChunk, DocumentStatus
 
 LEXICAL_RELEVANCE_THRESHOLD = 0.25
 MIN_LEXICAL_MATCH_COUNT = 2
@@ -91,16 +90,55 @@ def search_chunks(
 def search_chunks_in_database(
     session: Session,
     query_embedding: list[float],
-    owner_id: int,
+    owner_id: int | None = None,
     top_k: int = 3,
     query: str = "",
     document_id: int | None = None,
+    organization_id: int | None = None,
+    knowledge_base_id: int | None = None,
 ) -> list[dict]:
     """Use pgvector in PostgreSQL, with a SQLite fallback for local tests."""
+    if owner_id is None and (organization_id is None or knowledge_base_id is None):
+        raise ValueError(
+            "owner_id or organization and knowledge base scope is required"
+        )
+
+    common_conditions = [
+        Document.status == DocumentStatus.PUBLISHED.value,
+        DocumentChunk.status == DocumentStatus.PUBLISHED.value,
+        DocumentChunk.document_version == Document.version,
+        DocumentChunk.is_embedded.is_(True),
+    ]
+
+    if owner_id is not None:
+        common_conditions.extend(
+            [
+                DocumentChunk.owner_id == owner_id,
+                Document.owner_id == owner_id,
+            ]
+        )
+
+    if organization_id is not None:
+        common_conditions.extend(
+            [
+                DocumentChunk.organization_id == organization_id,
+                Document.organization_id == organization_id,
+            ]
+        )
+
+    if knowledge_base_id is not None:
+        common_conditions.extend(
+            [
+                DocumentChunk.knowledge_base_id == knowledge_base_id,
+                Document.knowledge_base_id == knowledge_base_id,
+            ]
+        )
+
     if session.bind is None or session.bind.dialect.name != "postgresql":
-        statement = select(DocumentChunk).where(
-            DocumentChunk.owner_id == owner_id,
-            DocumentChunk.is_embedded.is_(True),
+        statement = (
+            select(DocumentChunk)
+            .join(Document, Document.id == DocumentChunk.document_id)
+            .where(*common_conditions)
         )
         if document_id is not None:
             statement = statement.where(DocumentChunk.document_id == document_id)
@@ -116,9 +154,9 @@ def search_chunks_in_database(
     candidate_limit = max(top_k * 5, top_k)
     statement = (
         select(DocumentChunk, distance.label("distance"))
+        .join(Document, Document.id == DocumentChunk.document_id)
         .where(
-            DocumentChunk.owner_id == owner_id,
-            DocumentChunk.is_embedded.is_(True),
+            *common_conditions,
             DocumentChunk.embedding_vector.is_not(None),
         )
         .order_by(distance)
@@ -158,7 +196,4 @@ def search_chunks_in_database(
 
 
 def build_context(results: list[dict]) -> str:
-    return "\n\n".join(
-        f"[{item['reference']}]\n{item['content']}"
-        for item in results
-    )
+    return "\n\n".join(f"[{item['reference']}]\n{item['content']}" for item in results)

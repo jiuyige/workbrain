@@ -6,7 +6,6 @@ from sqlmodel import Session, select
 from app.llm import generate_tool_final_answer, plan_with_tools
 from app.models import AgentTrace, Todo, ToolCallLog, User
 
-
 TOOL_POLICIES = {
     "create_todo": {
         "risk_level": "safe",
@@ -298,7 +297,7 @@ def run_todo_agent(
 
     if not message.tool_calls:
         reply = message.content or ""
-    
+
         save_agent_trace(
             session=session,
             owner_id=current_user.id,
@@ -307,7 +306,7 @@ def run_todo_agent(
             final_reply=reply,
             tool_call_count=0,
         )
-    
+
         return {
             "action": "chat",
             "reply": reply,
@@ -404,7 +403,6 @@ def run_todo_agent(
         tool_call_count=len(executions),
     )
 
-    
     return {
         "action": action,
         "reply": final_reply,

@@ -3,14 +3,20 @@ import json
 import re
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session, SQLModel, create_engine, select
 from sqlmodel.pool import StaticPool
 
 from app.database import get_session
-from app.models import Document, DocumentChunk, DocumentProcessLog, User
+from app.models import (
+    Document,
+    DocumentChunk,
+    DocumentProcessLog,
+    DocumentStatus,
+    User,
+)
 from main import app
-
 
 engine = create_engine(
     "sqlite://",
@@ -31,6 +37,33 @@ client = TestClient(app)
 def setup_function():
     SQLModel.metadata.drop_all(engine)
     SQLModel.metadata.create_all(engine)
+
+
+@pytest.mark.parametrize(
+    ("app_env", "expected_create_calls"),
+    [
+        ("development", 1),
+        ("production", 0),
+    ],
+)
+def test_startup_table_creation_depends_on_environment(
+    monkeypatch,
+    app_env,
+    expected_create_calls,
+):
+    main_module = importlib.import_module("app.main")
+    create_calls = []
+
+    monkeypatch.setattr(main_module, "APP_ENV", app_env)
+    monkeypatch.setattr(
+        main_module,
+        "create_db_and_tables",
+        lambda: create_calls.append("called"),
+    )
+
+    main_module.on_startup()
+
+    assert len(create_calls) == expected_create_calls
 
 
 def _patch_if_present(monkeypatch, module_name, name, value):
@@ -58,7 +91,9 @@ def _fake_plan_with_tools(message):
         tool_calls = [_tool_call("mark_todo_done", {"todo_id": todo_id})]
     elif "删除" in message:
         todo_id = int(re.search(r"\d+", message).group())
-        tool_calls = [_tool_call("request_delete_todo_confirmation", {"todo_id": todo_id})]
+        tool_calls = [
+            _tool_call("request_delete_todo_confirmation", {"todo_id": todo_id})
+        ]
     elif "创建" in message or "待办" in message:
         title = message.split("：", 1)[-1]
         tool_calls = [_tool_call("create_todo", {"title": title, "priority": "medium"})]
@@ -133,8 +168,64 @@ def _register_and_login():
     return {"Authorization": f"Bearer {token}"}
 
 
+def test_register_and_login_remain_public():
+    username = "public_contract_user"
+    password = "public_contract_password"
+
+    register_response = client.post(
+        "/users/register",
+        json={"username": username, "password": password},
+    )
+    assert register_response.status_code == 200
+
+    login_response = client.post(
+        "/users/login",
+        json={"username": username, "password": password},
+    )
+    assert login_response.status_code == 200
+    assert login_response.json()["token_type"] == "bearer"
+    assert login_response.json()["access_token"]
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "json_body"),
+    [
+        ("GET", "/users/me", None),
+        ("GET", "/documents", None),
+        ("GET", "/documents/process-logs", None),
+        ("POST", "/rag/ask", {"question": "test"}),
+        ("GET", "/rag/logs", None),
+        ("GET", "/todos", None),
+        ("POST", "/assistant/tools", {"message": "test"}),
+        ("GET", "/assistant/tool-logs", None),
+        ("GET", "/assistant/traces", None),
+    ],
+)
+def test_protected_endpoints_require_authentication(method, path, json_body):
+    request_kwargs = {}
+
+    if json_body is not None:
+        request_kwargs["json"] = json_body
+
+    response = client.request(method, path, **request_kwargs)
+
+    assert response.status_code == 401
+
+
+def test_list_users_requires_authentication():
+    response = client.get("/users")
+
+    assert response.status_code == 401
+
+
 def test_full_agent_regression_flow(monkeypatch, tmp_path):
     _install_llm_fakes(monkeypatch)
+    _patch_if_present(
+        monkeypatch,
+        "app.routers.documents",
+        "dispatch_document_processing_job",
+        lambda **_kwargs: None,
+    )
     headers = _register_and_login()
 
     file_path = tmp_path / "note.txt"
@@ -232,9 +323,12 @@ RAG_UNANSWERABLE_CASES = [
 
 def _seed_rag_chunks():
     with Session(engine) as session:
-        user = session.exec(select(User).where(User.username == "regression_user")).one()
+        user = session.exec(
+            select(User).where(User.username == "regression_user")
+        ).one()
         document = Document(
             owner_id=user.id,
+            status=DocumentStatus.PUBLISHED.value,
             original_filename="rag-test-source.md",
             stored_filename="rag-test-source.md",
             file_path="rag-test-source.md",
@@ -246,6 +340,7 @@ def _seed_rag_chunks():
         source_chunk = DocumentChunk(
             owner_id=user.id,
             document_id=document.id,
+            status=DocumentStatus.PUBLISHED.value,
             chunk_index=0,
             content=RAG_SOURCE_TEXT,
             char_count=len(RAG_SOURCE_TEXT),
@@ -255,6 +350,7 @@ def _seed_rag_chunks():
         semantic_distractor = DocumentChunk(
             owner_id=user.id,
             document_id=document.id,
+            status=DocumentStatus.PUBLISHED.value,
             chunk_index=1,
             content="RAG 学习笔记：先把文档内容读出来，再考虑向量库。",
             char_count=28,
@@ -349,7 +445,6 @@ def test_rag_unanswerable_cases_do_not_call_the_llm_or_return_sources(monkeypatc
     assert all(log["source_chunk_ids"] == [] for log in logs)
 
 
-
 def test_delete_document_removes_related_chunks(tmp_path):
     headers = _register_and_login()
 
@@ -395,12 +490,9 @@ def test_delete_document_removes_related_chunks(tmp_path):
         assert session.get(Document, document_id) is None
 
         chunks = session.exec(
-            select(DocumentChunk).where(
-                DocumentChunk.document_id == document_id
-            )
+            select(DocumentChunk).where(DocumentChunk.document_id == document_id)
         ).all()
         assert chunks == []
-
 
 
 def test_list_documents_reports_rag_readiness():
@@ -419,6 +511,7 @@ def test_list_documents_reports_rag_readiness():
         )
         ready_document = Document(
             owner_id=user.id,
+            status=DocumentStatus.PUBLISHED.value,
             original_filename="ready.md",
             stored_filename="ready.md",
             file_path="ready.md",
@@ -434,6 +527,7 @@ def test_list_documents_reports_rag_readiness():
             DocumentChunk(
                 owner_id=user.id,
                 document_id=ready_document.id,
+                status=DocumentStatus.PUBLISHED.value,
                 chunk_index=0,
                 content="已完成向量化的测试内容",
                 char_count=11,
@@ -449,10 +543,7 @@ def test_list_documents_reports_rag_readiness():
     response = client.get("/documents", headers=headers)
     _assert_ok(response, "list documents")
 
-    documents = {
-        document["id"]: document
-        for document in response.json()["documents"]
-    }
+    documents = {document["id"]: document for document in response.json()["documents"]}
 
     assert documents[pending_id]["is_ready_for_rag"] is False
     assert documents[pending_id]["chunk_count"] == 0
@@ -460,7 +551,6 @@ def test_list_documents_reports_rag_readiness():
     assert documents[ready_id]["is_ready_for_rag"] is True
     assert documents[ready_id]["chunk_count"] == 1
     assert documents[ready_id]["embedded_chunk_count"] == 1
-
 
 
 def test_process_document_builds_ready_rag_document(monkeypatch, tmp_path):
@@ -487,7 +577,7 @@ def test_process_document_builds_ready_rag_document(monkeypatch, tmp_path):
 
     _patch_if_present(
         monkeypatch,
-        "app.routers.documents",
+        "app.document_processing",
         "generate_embedding",
         lambda _text: [0.1, 0.2],
     )
@@ -498,20 +588,24 @@ def test_process_document_builds_ready_rag_document(monkeypatch, tmp_path):
     )
     _assert_ok(response, "process document")
 
-    assert response.json()["is_ready_for_rag"] is True
+    assert response.json()["is_ready_for_publish"] is True
+    assert response.json()["is_ready_for_rag"] is False
 
     with Session(engine) as session:
         document = session.get(Document, document_id)
         chunks = session.exec(
-            select(DocumentChunk).where(
-                DocumentChunk.document_id == document_id
-            )
+            select(DocumentChunk).where(DocumentChunk.document_id == document_id)
         ).all()
 
         assert document.is_extracted is True
+        assert document.status == DocumentStatus.READY.value
         assert len(chunks) == 1
         assert chunks[0].is_embedded is True
         assert chunks[0].embedding_vector == [0.1, 0.2]
+        assert chunks[0].organization_id == document.organization_id
+        assert chunks[0].knowledge_base_id == document.knowledge_base_id
+        assert chunks[0].document_version == document.version
+        assert chunks[0].status == DocumentStatus.READY.value
 
     logs_response = client.get(
         "/documents/process-logs",
@@ -585,7 +679,7 @@ def test_process_document_keeps_old_data_on_failure_and_can_retry(
 
     _patch_if_present(
         monkeypatch,
-        "app.routers.documents",
+        "app.document_processing",
         "generate_embedding",
         flaky_embedding,
     )
@@ -615,9 +709,7 @@ def test_process_document_keeps_old_data_on_failure_and_can_retry(
     with Session(engine) as session:
         document = session.get(Document, document_id)
         chunks = session.exec(
-            select(DocumentChunk).where(
-                DocumentChunk.document_id == document_id
-            )
+            select(DocumentChunk).where(DocumentChunk.document_id == document_id)
         ).all()
 
         assert document.extracted_text == "这是旧的文档内容。"
@@ -633,9 +725,7 @@ def test_process_document_keeps_old_data_on_failure_and_can_retry(
     with Session(engine) as session:
         document = session.get(Document, document_id)
         chunks = session.exec(
-            select(DocumentChunk).where(
-                DocumentChunk.document_id == document_id
-            )
+            select(DocumentChunk).where(DocumentChunk.document_id == document_id)
         ).all()
 
         assert document.extracted_text == "这是新的文档内容。"
@@ -660,7 +750,6 @@ def test_process_document_keeps_old_data_on_failure_and_can_retry(
     assert success_logs[0]["embedded_count"] == 1
     assert success_logs[0]["error_message"] is None
     assert failure_logs[0]["error_message"] == "failed to create embedding"
-
 
 
 def test_process_document_checks_budget_before_embedding(
@@ -696,14 +785,14 @@ def test_process_document_checks_budget_before_embedding(
 
     _patch_if_present(
         monkeypatch,
-        "app.routers.documents",
+        "app.document_processing",
         "generate_embedding",
         fake_embedding,
     )
 
     _patch_if_present(
         monkeypatch,
-        "app.routers.documents",
+        "app.document_processing",
         "RAG_MAX_DOCUMENT_CHARS",
         10,
     )
@@ -716,16 +805,15 @@ def test_process_document_checks_budget_before_embedding(
     assert response.status_code == 413
     assert embedding_calls["count"] == 0
 
-
     _patch_if_present(
         monkeypatch,
-        "app.routers.documents",
+        "app.document_processing",
         "RAG_MAX_DOCUMENT_CHARS",
         2000,
     )
     _patch_if_present(
         monkeypatch,
-        "app.routers.documents",
+        "app.document_processing",
         "RAG_MAX_CHUNKS_PER_DOCUMENT",
         1,
     )
@@ -786,10 +874,7 @@ def test_document_process_logs_are_isolated_by_user():
     )
     _assert_ok(response, "list isolated process logs")
 
-    returned_ids = {
-        log["id"]
-        for log in response.json()["logs"]
-    }
+    returned_ids = {log["id"] for log in response.json()["logs"]}
 
     assert current_log_id in returned_ids
     assert other_log_id not in returned_ids
