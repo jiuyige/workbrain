@@ -1,17 +1,29 @@
 import json
 from time import perf_counter
 
-from app.models import Document, RAGQueryLog, User
-
-
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 from app.auth import get_current_user
+from app.config import RAG_MIN_SCORE
+from app.context import (
+    OrganizationContext,
+    get_current_organization_context,
+)
 from app.database import get_session
 from app.embedding import generate_embedding
 from app.llm import answer_with_documents
+from app.models import (
+    LEGACY_KNOWLEDGE_BASE_ID,
+    LEGACY_ORGANIZATION_ID,
+    Document,
+    DocumentStatus,
+    KnowledgeBase,
+    RAGQueryLog,
+    User,
+)
 from app.rag import (
     LEXICAL_RELEVANCE_THRESHOLD,
     MIN_LEXICAL_MATCH_COUNT,
@@ -19,14 +31,16 @@ from app.rag import (
     search_chunks_in_database,
 )
 
-from app.config import RAG_MIN_SCORE
-
 router = APIRouter(prefix="/rag", tags=["rag"])
 
 
 class RAGAskRequest(BaseModel):
     question: str
     document_id: int | None = None
+
+
+class KnowledgeBaseRAGAskRequest(BaseModel):
+    question: str
 
 
 def save_rag_query_log(
@@ -38,9 +52,13 @@ def save_rag_query_log(
     used_llm: bool,
     source_chunk_ids: list[int],
     total_latency_ms: int,
+    organization_id: int = LEGACY_ORGANIZATION_ID,
+    knowledge_base_id: int = LEGACY_KNOWLEDGE_BASE_ID,
 ) -> RAGQueryLog:
     log = RAGQueryLog(
         owner_id=owner_id,
+        organization_id=organization_id,
+        knowledge_base_id=knowledge_base_id,
         question=question,
         top_score=top_score,
         matched_count=matched_count,
@@ -55,40 +73,33 @@ def save_rag_query_log(
     return log
 
 
-@router.post("/ask")
-def ask_rag(
-    body: RAGAskRequest,
-    session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_user),
+def answer_rag_query(
+    session: Session,
+    *,
+    question: str,
+    log_owner_id: int,
+    retrieval_owner_id: int | None,
+    organization_id: int = LEGACY_ORGANIZATION_ID,
+    knowledge_base_id: int | None = None,
+    document_id: int | None = None,
 ):
     started_at = perf_counter()
-
-    question = body.question.strip()
+    question = question.strip()
 
     if not question:
         raise HTTPException(status_code=400, detail="question cannot be empty")
 
-
-    if body.document_id is not None:
-        document = session.exec(
-            select(Document).where(
-                Document.id == body.document_id,
-                Document.owner_id == current_user.id,
-            )
-        ).first()
-    
-        if document is None:
-            raise HTTPException(status_code=404, detail="document not found")
-    
     query_embedding = generate_embedding(question)
 
     candidate_results = search_chunks_in_database(
         session=session,
         query_embedding=query_embedding,
-        owner_id=current_user.id,
+        owner_id=retrieval_owner_id,
         top_k=3,
         query=question,
-        document_id=body.document_id,
+        document_id=document_id,
+        organization_id=organization_id if knowledge_base_id is not None else None,
+        knowledge_base_id=knowledge_base_id,
     )
 
     grounded_results = [
@@ -99,16 +110,14 @@ def ask_rag(
     ]
     top_score = grounded_results[0]["rank_score"] if grounded_results else None
 
-    results = [
-        item
-        for item in grounded_results
-        if item["rank_score"] >= RAG_MIN_SCORE
-    ]
+    results = [item for item in grounded_results if item["rank_score"] >= RAG_MIN_SCORE]
 
     if not results:
         log = save_rag_query_log(
             session=session,
-            owner_id=current_user.id,
+            owner_id=log_owner_id,
+            organization_id=organization_id,
+            knowledge_base_id=knowledge_base_id,
             question=question,
             top_score=top_score,
             matched_count=len(results),
@@ -136,7 +145,9 @@ def ask_rag(
 
     log = save_rag_query_log(
         session=session,
-        owner_id=current_user.id,
+        owner_id=log_owner_id,
+        organization_id=organization_id,
+        knowledge_base_id=knowledge_base_id,
         question=question,
         top_score=top_score,
         matched_count=len(results),
@@ -169,6 +180,68 @@ def ask_rag(
     }
 
 
+@router.post("/ask")
+def ask_rag(
+    body: RAGAskRequest,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    if body.document_id is not None:
+        document = session.exec(
+            select(Document).where(
+                Document.id == body.document_id,
+                Document.owner_id == current_user.id,
+                Document.organization_id == LEGACY_ORGANIZATION_ID,
+            )
+        ).first()
+
+        if document is None:
+            raise HTTPException(status_code=404, detail="document not found")
+
+        if document.status != DocumentStatus.PUBLISHED.value:
+            raise HTTPException(
+                status_code=409,
+                detail="document is not published",
+            )
+
+    return answer_rag_query(
+        session,
+        question=body.question,
+        log_owner_id=current_user.id,
+        retrieval_owner_id=current_user.id,
+        organization_id=LEGACY_ORGANIZATION_ID,
+        knowledge_base_id=LEGACY_KNOWLEDGE_BASE_ID,
+        document_id=body.document_id,
+    )
+
+
+@router.post("/knowledge-bases/{knowledge_base_id}/ask")
+def ask_knowledge_base_rag(
+    knowledge_base_id: int,
+    body: KnowledgeBaseRAGAskRequest,
+    context: OrganizationContext = Depends(get_current_organization_context),
+    session: Session = Depends(get_session),
+):
+    knowledge_base = session.exec(
+        select(KnowledgeBase).where(
+            KnowledgeBase.id == knowledge_base_id,
+            KnowledgeBase.organization_id == context.organization.id,
+        )
+    ).first()
+
+    if knowledge_base is None:
+        raise HTTPException(status_code=404, detail="knowledge base not found")
+
+    return answer_rag_query(
+        session,
+        question=body.question,
+        log_owner_id=context.membership.user_id,
+        retrieval_owner_id=None,
+        organization_id=context.organization.id,
+        knowledge_base_id=knowledge_base.id,
+    )
+
+
 @router.get("/logs")
 def list_rag_logs(
     session: Session = Depends(get_session),
@@ -176,7 +249,11 @@ def list_rag_logs(
 ):
     logs = session.exec(
         select(RAGQueryLog)
-        .where(RAGQueryLog.owner_id == current_user.id)
+        .where(
+            RAGQueryLog.owner_id == current_user.id,
+            RAGQueryLog.organization_id == LEGACY_ORGANIZATION_ID,
+            RAGQueryLog.knowledge_base_id == LEGACY_KNOWLEDGE_BASE_ID,
+        )
         .order_by(RAGQueryLog.created_at.desc())
         .limit(20)
     ).all()
@@ -194,3 +271,64 @@ def list_rag_logs(
         }
         for log in logs
     ]
+
+
+@router.get("/knowledge-bases/{knowledge_base_id}/logs")
+def list_knowledge_base_rag_logs(
+    knowledge_base_id: int,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=20, ge=1, le=100),
+    context: OrganizationContext = Depends(get_current_organization_context),
+    session: Session = Depends(get_session),
+):
+    knowledge_base = session.exec(
+        select(KnowledgeBase).where(
+            KnowledgeBase.id == knowledge_base_id,
+            KnowledgeBase.organization_id == context.organization.id,
+        )
+    ).first()
+
+    if knowledge_base is None:
+        raise HTTPException(status_code=404, detail="knowledge base not found")
+
+    log_conditions = (
+        RAGQueryLog.organization_id == context.organization.id,
+        RAGQueryLog.knowledge_base_id == knowledge_base.id,
+    )
+    total = session.exec(
+        select(func.count()).select_from(RAGQueryLog).where(*log_conditions)
+    ).one()
+    logs = session.exec(
+        select(RAGQueryLog)
+        .where(*log_conditions)
+        .order_by(
+            RAGQueryLog.created_at.desc(),
+            RAGQueryLog.id.desc(),
+        )
+        .offset(offset)
+        .limit(limit)
+    ).all()
+
+    return {
+        "knowledge_base_id": knowledge_base.id,
+        "logs": [
+            {
+                "id": log.id,
+                "owner_id": log.owner_id,
+                "question": log.question,
+                "top_score": log.top_score,
+                "matched_count": log.matched_count,
+                "used_llm": log.used_llm,
+                "source_chunk_ids": json.loads(log.source_chunk_ids_json),
+                "total_latency_ms": log.total_latency_ms,
+                "created_at": log.created_at,
+            }
+            for log in logs
+        ],
+        "pagination": {
+            "offset": offset,
+            "limit": limit,
+            "total": total,
+            "returned": len(logs),
+        },
+    }

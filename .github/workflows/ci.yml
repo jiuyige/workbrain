@@ -1,0 +1,160 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      APP_ENV: test
+      DATABASE_URL: sqlite://
+      SECRET_KEY: ci-test-secret-key-at-least-32-bytes-long
+      DEEPSEEK_API_KEY: ci-test-deepseek-key
+      OPENAI_API_KEY: ci-test-openai-key
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-mcp-demo.txt
+
+      - name: Run Ruff lint
+        run: python -m ruff check --output-format=github .
+
+      - name: Check Ruff formatting
+        run: python -m ruff format --check .
+
+      - name: Run backend tests except the PostgreSQL-only integration
+        run: |
+          python -m pytest \
+            --ignore=tests/test_pgvector_integration.py \
+            -q
+
+  pgvector-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.2-pg16-trixie
+        env:
+          POSTGRES_USER: workbrain
+          POSTGRES_PASSWORD: workbrain-ci-password
+          POSTGRES_DB: workbrain
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U workbrain -d workbrain"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      APP_ENV: test
+      DATABASE_URL: postgresql+psycopg://workbrain:workbrain-ci-password@localhost:5432/workbrain
+      SECRET_KEY: ci-test-secret-key-at-least-32-bytes-long
+      DEEPSEEK_API_KEY: ci-test-deepseek-key
+      OPENAI_API_KEY: ci-test-openai-key
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Apply migrations before legacy organization migration
+        run: python -m alembic upgrade 01ac9962e75a
+
+      - name: Verify legacy organization data migration
+        run: python -m tests.legacy_migration_check
+
+      - name: Verify database migrations
+        run: |
+          python -m alembic current
+          python -m alembic check
+
+      - name: Run pgvector integration test
+        run: python -m pytest tests/test_pgvector_integration.py -q
+
+  frontend-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run frontend tests
+        run: npm run test
+
+      - name: Run frontend lint
+        run: npm run lint
+
+      - name: Build frontend
+        run: npm run build
+
+  container-artifacts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      POSTGRES_PASSWORD: workbrain-ci-password
+      DATABASE_URL: postgresql+psycopg://workbrain:workbrain-ci-password@postgres:5432/workbrain
+      SECRET_KEY: ci-container-secret-key-at-least-32-bytes
+      DEEPSEEK_API_KEY: ci-deepseek-key
+      OPENAI_API_KEY: ci-openai-key
+      CORS_ORIGINS: https://workbrain.example.com
+      SITE_ADDRESS: workbrain.example.com
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Validate Compose configuration
+        run: docker compose config --quiet
+
+      - name: Build backend image
+        run: docker build --tag workbrain-api-ci .
+
+      - name: Build frontend image
+        run: docker build --tag workbrain-frontend-ci ./frontend

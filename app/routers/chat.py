@@ -1,13 +1,11 @@
+import json
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
-
-import json
-
-
-from app.config import CHAT_HISTORY_MAX_CHARS
 from app.auth import get_current_user
+from app.config import CHAT_HISTORY_MAX_CHARS
 from app.database import get_session
 from app.llm import analyze_text, generate_answer
 from app.models import ChatMessage, LLMCallLog, Todo, User
@@ -53,8 +51,6 @@ class ChatResponse(BaseModel):
     history_message_count: int
 
 
-
-
 def build_history_messages(recent_messages: list[ChatMessage]) -> list[dict]:
     history = []
     used_chars = 0
@@ -85,6 +81,7 @@ def build_history_messages(recent_messages: list[ChatMessage]) -> list[dict]:
 
     return history
 
+
 @router.post("", response_model=ChatResponse)
 def chat(
     request: ChatRequest,
@@ -114,7 +111,7 @@ def chat(
         user_message=request.message,
         assistant_message=answer,
     )
-    
+
     llm_call_log = LLMCallLog(
         owner_id=current_user.id,
         model=result["model"],
@@ -132,15 +129,15 @@ def chat(
 
     session.add(chat_message)
     llm_call_log = LLMCallLog(
-    owner_id=current_user.id,
-    model=result["model"],
-    input_tokens=result["input_tokens"],
-    output_tokens=result["output_tokens"],
-    total_tokens=result["total_tokens"],
-    prompt_cache_hit_tokens=result["prompt_cache_hit_tokens"],
-    prompt_cache_miss_tokens=result["prompt_cache_miss_tokens"],
-    estimated_cost_usd=result["estimated_cost_usd"],
-)
+        owner_id=current_user.id,
+        model=result["model"],
+        input_tokens=result["input_tokens"],
+        output_tokens=result["output_tokens"],
+        total_tokens=result["total_tokens"],
+        prompt_cache_hit_tokens=result["prompt_cache_hit_tokens"],
+        prompt_cache_miss_tokens=result["prompt_cache_miss_tokens"],
+        estimated_cost_usd=result["estimated_cost_usd"],
+    )
 
     return {
         "answer": answer,
@@ -156,6 +153,7 @@ def chat(
         "finish_reason": result["finish_reason"],
         "history_message_count": len(history),
     }
+
 
 @router.get("/usage")
 def get_chat_usage(
@@ -225,7 +223,7 @@ def analyze(
         raise HTTPException(status_code=502, detail="llm returned invalid priority")
 
     todos = []
-    
+
     for task in result.get("tasks", []):
         todo = Todo(
             owner_id=current_user.id,

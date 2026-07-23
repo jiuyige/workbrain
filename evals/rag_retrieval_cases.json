@@ -1,0 +1,131 @@
+{
+  "version": 1,
+  "description": "WorkBrain 企业知识库检索与拒答固定基线",
+  "top_k": 3,
+  "chunks": [
+    {
+      "id": "chunk-vpn",
+      "document_id": "doc-it-services",
+      "chunk_index": 0,
+      "content": "VPN 远程访问服务用于员工在公司外安全访问内部系统。申请 VPN 时需要填写使用原因和预计使用期限。",
+      "embedding": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    },
+    {
+      "id": "chunk-password",
+      "document_id": "doc-it-services",
+      "chunk_index": 1,
+      "content": "密码重置服务适用于忘记企业账号密码的员工。提交密码重置申请后，服务台会核验申请人的身份。",
+      "embedding": [0.0, 1.0, 0.0, 0.0, 0.0, 0.0]
+    },
+    {
+      "id": "chunk-password-distractor",
+      "document_id": "doc-it-services",
+      "chunk_index": 6,
+      "content": "密码重置申请提交后会生成工单，本节不说明由谁核验申请人身份。",
+      "embedding": [0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+      "is_distractor": true
+    },
+    {
+      "id": "chunk-hardware",
+      "document_id": "doc-it-services",
+      "chunk_index": 2,
+      "content": "电脑更换服务用于设备故障或达到报废年限的场景。申请电脑更换需要说明设备编号和故障现象。",
+      "embedding": [0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+    },
+    {
+      "id": "chunk-software",
+      "document_id": "doc-it-services",
+      "chunk_index": 3,
+      "content": "软件安装服务用于申请安装工作需要的软件。申请人必须提供软件名称、版本和业务用途。",
+      "embedding": [0.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+    },
+    {
+      "id": "chunk-approval",
+      "document_id": "doc-request-process",
+      "chunk_index": 0,
+      "content": "IT 服务申请创建后的初始状态是 pending。approver 或 admin 可以批准或拒绝申请，拒绝时必须填写原因。",
+      "embedding": [0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    },
+    {
+      "id": "chunk-knowledge-base",
+      "document_id": "doc-knowledge-base",
+      "chunk_index": 0,
+      "content": "企业知识库只检索已经发布的文档。RAG 回答会返回引用编号、文档编号和对应的文档片段。",
+      "embedding": [0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    }
+  ],
+  "cases": [
+    {
+      "id": "A01",
+      "question": "申请 VPN 远程访问服务需要填写什么？",
+      "query_embedding": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+      "expected_chunk_id": "chunk-vpn"
+    },
+    {
+      "id": "A02",
+      "question": "忘记企业账号密码后如何申请密码重置服务？",
+      "query_embedding": [0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+      "expected_chunk_id": "chunk-password"
+    },
+    {
+      "id": "A03",
+      "question": "申请电脑更换需要提供哪些故障信息？",
+      "query_embedding": [0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+      "expected_chunk_id": "chunk-hardware"
+    },
+    {
+      "id": "A04",
+      "question": "申请软件安装时必须提供哪些内容？",
+      "query_embedding": [0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+      "expected_chunk_id": "chunk-software"
+    },
+    {
+      "id": "A05",
+      "question": "谁可以批准或拒绝 IT 服务申请？",
+      "query_embedding": [0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+      "expected_chunk_id": "chunk-approval"
+    },
+    {
+      "id": "A06",
+      "question": "企业知识库 RAG 回答会返回哪些引用信息？",
+      "query_embedding": [0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+      "expected_chunk_id": "chunk-knowledge-base"
+    },
+    {
+      "id": "A07",
+      "question": "密码重置申请提交后由谁核验申请人身份？",
+      "query_embedding": [0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+      "expected_chunk_id": "chunk-password"
+    },
+    {
+      "id": "A08",
+      "question": "员工在公司外访问内部系统时需要提供什么申请信息？",
+      "query_embedding": [-0.05, 0.9987, 0.0, 0.0, 0.0, 0.0],
+      "expected_chunk_id": "chunk-vpn"
+    },
+    {
+      "id": "U01",
+      "question": "上海明天会不会下雨？",
+      "query_embedding": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+      "expected_chunk_id": null
+    },
+    {
+      "id": "U02",
+      "question": "公司食堂今天供应什么午餐？",
+      "query_embedding": [0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+      "expected_chunk_id": null
+    },
+    {
+      "id": "U03",
+      "question": "今年国庆节放假几天？",
+      "query_embedding": [0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+      "expected_chunk_id": null
+    },
+    {
+      "id": "U04",
+      "question": "VPN 远程访问服务每月价格是多少？",
+      "query_embedding": [-0.1, 0.995, 0.0, 0.0, 0.0, 0.0],
+      "expected_chunk_id": null
+    }
+  ]
+}

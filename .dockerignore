@@ -1,8 +1,13 @@
 .venv
+.idea
 __pycache__
 *.pyc
 .pytest_cache
+.ruff_cache
 .git
 .env
 uploads
 .DS_Store
+frontend/node_modules
+frontend/dist
+frontend/.env*
